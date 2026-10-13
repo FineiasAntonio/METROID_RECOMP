@@ -3,7 +3,7 @@
 
 typedef struct {
     uint64_t size, addr;
-    uint32_t align, kind, id;
+    uint32_t align, kind, id, iova;
 } NvMapHandle;
 
 typedef struct {
@@ -17,3 +17,4 @@ extern int ngpu_maps;
 uint32_t syncpt_value(int id);
 void gpu_submit(int channel_syncpt, const uint64_t *entries, uint32_t n);
 void gpu_dump_hist(void);
+void host1x_cmdbuf(int cls, const uint32_t *w, uint32_t n);

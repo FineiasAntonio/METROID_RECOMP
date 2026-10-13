@@ -1,4 +1,6 @@
 #include <math.h>
+#include <sys/mman.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,7 +239,8 @@ static Prog *get_prog(uint64_t va, int stage) {
 typedef struct {
     uint8_t tic[32];
     GLuint tex;
-    uint64_t cpu;
+    uint64_t cpu, size;
+    volatile int dirty;
 } Tex;
 
 static Tex texs[2048];
@@ -264,6 +267,49 @@ static const TexFmt tex_fmts[] = {
     {0x10, 0x8e8e, 0, 0, 16, 4, 4}, {0x11, 0x8e8f, 0, 0, 16, 4, 4},
 };
 
+static pthread_mutex_t dirty_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t cpu, size; } dirty[64];
+static int ndirty;
+
+void texture_invalidate(uint64_t cpu, uint64_t size) {
+    if (getenv("NO_INVALIDATE")) return;
+    pthread_mutex_lock(&dirty_lock);
+    if (ndirty < 64) dirty[ndirty++] = (typeof(dirty[0])){cpu, size};
+    pthread_mutex_unlock(&dirty_lock);
+}
+
+static void flush_dirty(void) {
+    pthread_mutex_lock(&dirty_lock);
+    for (int d = 0; d < ndirty; d++)
+        for (int i = 0; i < ntexs; i++)
+            if (texs[i].cpu >= dirty[d].cpu && texs[i].cpu < dirty[d].cpu + dirty[d].size) {
+                glDeleteTextures(1, &texs[i].tex);
+                texs[i--] = texs[--ntexs];
+            }
+    ndirty = 0;
+    pthread_mutex_unlock(&dirty_lock);
+}
+
+#define PAGE 4096ull
+
+static void protect(Tex *t) {
+    uint64_t lo = t->cpu & ~(PAGE - 1), hi = (t->cpu + t->size + PAGE - 1) & ~(PAGE - 1);
+    mprotect((void *)lo, hi - lo, PROT_READ);
+}
+
+int texture_fault(uint64_t addr) {
+    uint64_t page = addr & ~(PAGE - 1);
+    int hit = 0;
+    for (int i = 0; i < ntexs; i++)
+        if (texs[i].cpu < page + PAGE && texs[i].cpu + texs[i].size > page) { texs[i].dirty = 1; hit = 1; }
+    if (hit) mprotect((void *)page, PAGE, PROT_READ | PROT_WRITE);
+    return hit;
+}
+
+void guest_write_prepare(uint64_t addr, uint64_t size) {
+    for (uint64_t p = addr & ~(PAGE - 1); p < addr + size; p += PAGE) texture_fault(p);
+}
+
 static GLuint get_texture(const uint32_t *tic) {
     uint64_t cpu = 0;
     uint64_t va = (uint64_t)(tic[2] & 0xffff) << 32 | tic[1];
@@ -274,7 +320,12 @@ static GLuint get_texture(const uint32_t *tic) {
     unsigned stex, sfbo;
     if (surface_lookup(cpu, w, h, &stex, &sfbo)) return stex;
     for (int i = 0; i < ntexs; i++)
-        if (!memcmp(texs[i].tic, tic, 32)) return texs[i].tex;
+        if (!memcmp(texs[i].tic, tic, 32)) {
+            if (!texs[i].dirty) return texs[i].tex;
+            glDeleteTextures(1, &texs[i].tex);
+            texs[i--] = texs[--ntexs];
+            break;
+        }
     uint32_t fmt = tic[0] & 0x7f, layout = tic[2] >> 21 & 7, bh = tic[3] >> 3 & 7;
     const TexFmt *f = NULL;
     for (size_t i = 0; i < sizeof tex_fmts / sizeof *tex_fmts; i++)
@@ -298,15 +349,19 @@ static GLuint get_texture(const uint32_t *tic) {
         for (uint32_t y = 0; y < bhh; y++) memcpy(lin + (size_t)y * row, src + (size_t)y * pitch, row);
     }
     if (ntexs == 2048) { glDeleteTextures(1, &texs[0].tex); texs[0] = texs[--ntexs]; }
+    (void)0;
     Tex *t = &texs[ntexs++];
     memcpy(t->tic, tic, 32);
     t->cpu = cpu;
+    t->dirty = 0;
+    t->size = layout == 3 || layout == 4 ? (uint64_t)row * ((bhh + (8u << bh) - 1) & ~((8u << bh) - 1)) : (uint64_t)((tic[3] & 0xffff) << 5 ? (tic[3] & 0xffff) << 5 : row) * bhh;
     glCreateTextures(GL_TEXTURE_2D, 1, &t->tex);
     glTextureStorage2D(t->tex, 1, srgb ? GL_SRGB8_ALPHA8 : f->internal, (GLsizei)w, (GLsizei)h);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (f->bw > 1) glCompressedTextureSubImage2D(t->tex, 0, 0, 0, (GLsizei)w, (GLsizei)h, f->internal, (GLsizei)((size_t)row * bhh), lin);
     else glTextureSubImage2D(t->tex, 0, 0, 0, (GLsizei)w, (GLsizei)h, f->format, f->type, lin);
     free(lin);
+    protect(t);
     static const GLint src_map[8] = {GL_ZERO, GL_ZERO, GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ONE, GL_ONE};
     GLint sw[4] = {src_map[tic[0] >> 19 & 7], src_map[tic[0] >> 22 & 7], src_map[tic[0] >> 25 & 7], src_map[tic[0] >> 28 & 7]};
     glTextureParameteriv(t->tex, GL_TEXTURE_SWIZZLE_RGBA, sw);
@@ -456,6 +511,7 @@ static GLuint bind_targets(const uint32_t *r, uint32_t *out_w, uint32_t *out_h) 
 void maxwell_draw(const uint32_t *r, void *(*gpu_ptr)(uint64_t), const CbBind (*cb)[18], int indexed) {
     shader_dump(r, gpu_ptr);
     gp = gpu_ptr;
+    flush_dirty();
     R = r;
     static int init;
     if (!init) {
@@ -578,7 +634,7 @@ void maxwell_draw(const uint32_t *r, void *(*gpu_ptr)(uint64_t), const CbBind (*
     if (getenv("DRAW_LOG")) {
         static uint64_t ndraw;
         uint64_t lo = strtoull(getenv("DRAW_LOG"), NULL, 0);
-        if (ndraw >= lo && ndraw < lo + 40) {
+        if (ndraw >= lo && ndraw < lo + 400) {
             const uint32_t *t0 = r + 0x200 + (r[0x487] >> 4 & 7) * 0x10;
             fprintf(stderr, "[draw %lu] vs=%#x fs=%#x rt0=%#x%08x %ux%u fmt=%#x n=%u idx=%d cnt=%u blend=%u tex=%d",
                     ndraw, r[0x811], fs ? r[0x851] : 0, t0[0], t0[1], t0[2], t0[3], t0[4], r[0x487] & 0xf, indexed, indexed ? icount : vcount, r[0x4d8] & 1, fs ? fs->info.ntex : 0);

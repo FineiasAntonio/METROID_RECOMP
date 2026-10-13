@@ -623,6 +623,8 @@ uint64_t kernel_heap_base(void) { return HEAP_BASE; }
 
 static void on_fault(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
+    extern int texture_fault(uint64_t addr);
+    if (sig == SIGSEGV && si->si_code == SEGV_ACCERR && texture_fault((uint64_t)(uintptr_t)si->si_addr)) return;
     extern char __executable_start;
     fprintf(stderr, "\n[kernel] sinal %d acessando %p (rip=exe+%#llx) thread=%lu\n", sig, si->si_addr,
             (unsigned long long)(uc->uc_mcontext.gregs[REG_RIP] - (uintptr_t)&__executable_start), cur ? cur->id : 0);

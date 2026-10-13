@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include "ipc.h"
 
+void guest_write_prepare(uint64_t addr, uint64_t size);
+
 #define SVC(name, id) static void name##_h(Session *s, void *st, Request *rq, Response *rs); \
     const Service name = {id, name##_h}; \
     static void name##_h(Session *s, void *st, Request *rq, Response *rs)
@@ -64,6 +66,7 @@ SVC(storage, "fs:IStorage") {
         uint64_t off = IN(uint64_t, 0), size = IN(uint64_t, 8);
         Buf b = rq->b[0];
         if (size > b.size) size = b.size;
+        guest_write_prepare(b.addr, size);
         ssize_t r = pread(f->fd, (void *)b.addr, size, (off_t)off);
         if (getenv("FS_TRACE")) fprintf(stderr, "[fs] storage read off=%#lx size=%#lx buf=%#lx/%#lx -> %zd\n", off, IN(uint64_t, 8), b.addr, b.size, r);
         if (r < 0) rs->result = 0x3e802;
@@ -88,6 +91,7 @@ SVC(file, "fs:IFile") {
         uint64_t off = IN(uint64_t, 8), size = IN(uint64_t, 16);
         Buf b = rq->b[0];
         if (size > b.size) size = b.size;
+        guest_write_prepare(b.addr, size);
         ssize_t r = pread(f->fd, (void *)b.addr, size, (off_t)off);
         OUT(uint64_t, r < 0 ? 0 : (uint64_t)r);
         return;

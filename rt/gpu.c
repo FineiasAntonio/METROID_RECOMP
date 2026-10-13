@@ -19,6 +19,14 @@ static Engine sub[8];
 static uint32_t host_regs[0x40];
 static uint64_t submits, methods, sem_releases;
 
+uint64_t gpu_avail(uint64_t va) {
+    for (int i = ngpu_maps - 1; i >= 0; i--) {
+        GpuMapping *m = &gpu_maps[i];
+        if (va >= m->gpu_va && va < m->gpu_va + m->size) return m->gpu_va + m->size - va;
+    }
+    return 0;
+}
+
 void *gpu_ptr(uint64_t va) {
     for (int i = ngpu_maps - 1; i >= 0; i--) {
         GpuMapping *m = &gpu_maps[i];

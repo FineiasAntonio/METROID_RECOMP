@@ -12,7 +12,7 @@ enum { NV_OK = 0, NV_NOT_SUPPORTED = 2, NV_BAD_PARAM = 4, NV_CONFIG_NOT_FOUND = 
 enum { DEV_NONE, DEV_NVMAP, DEV_CTRL, DEV_CTRL_GPU, DEV_AS, DEV_GPU, DEV_OTHER_CHANNEL, DEV_OTHER };
 
 typedef struct {
-    int type, syncpt;
+    int type, syncpt, cls;
     KObject *events[8];
 } NvFd;
 
@@ -140,10 +140,17 @@ static uint32_t ioctl_ctrl_gpu(uint32_t cmd, uint8_t *d) {
     return 0;
 }
 
+static void add_mapping(uint64_t va, uint64_t cpu, uint64_t size) {
+    for (int i = 0; i < ngpu_maps; i++)
+        if (gpu_maps[i].gpu_va == va) { gpu_maps[i] = (GpuMapping){va, cpu, size}; return; }
+    if (ngpu_maps == (int)(sizeof gpu_maps / sizeof *gpu_maps)) { fprintf(stderr, "[nv] tabela de mapeamentos cheia\n"); abort(); }
+    gpu_maps[ngpu_maps++] = (GpuMapping){va, cpu, size};
+}
+
 static void gpu_map(uint64_t va, uint32_t handle, uint64_t off, uint64_t size) {
-    NvMapHandle *m = &nvmap[handle];
+    NvMapHandle *m = &nvmap[handle % 4096];
     if (!size) size = m->size - off;
-    gpu_maps[ngpu_maps++] = (GpuMapping){va, m->addr + off, size};
+    add_mapping(va, m->addr + off, size);
 }
 
 static uint32_t ioctl_as(uint32_t cmd, uint8_t *d) {
@@ -218,6 +225,11 @@ static uint32_t ioctl_mm_channel(uint32_t cmd, uint8_t *d, NvFd *f, Buf extra) {
     switch (cmd & 0xff) {
     case 0x01: {
         uint32_t nbuf = w[0], nreloc = w[1], nsync = w[2], nfence = w[3];
+        for (uint32_t i = 0; i < nbuf; i++) {
+            const uint32_t *cbd = (const uint32_t *)(d + 0x10 + i * 0xc);
+            NvMapHandle *m = &nvmap[cbd[0] % 4096];
+            if (m->addr) host1x_cmdbuf(f->type == DEV_OTHER_CHANNEL ? f->cls : 0, (const uint32_t *)(uintptr_t)(m->addr + cbd[1]), cbd[2]);
+        }
         uint8_t *p = d + 0x10 + nbuf * 0xc + nreloc * 0x10 + nreloc * 4;
         uint32_t *incr = (uint32_t *)p;
         uint32_t *fences = (uint32_t *)(p + nsync * 0x14);
@@ -236,10 +248,12 @@ static uint32_t ioctl_mm_channel(uint32_t cmd, uint8_t *d, NvFd *f, Buf extra) {
         for (uint32_t i = 0; i < n; i++) {
             uint32_t *e = &w[3 + i * 2];
             NvMapHandle *m = &nvmap[e[0] % 4096];
-            uint32_t iova = mm_iova_next;
-            mm_iova_next += (uint32_t)((m->size + 0xffff) & ~0xffffull);
-            gpu_maps[ngpu_maps++] = (GpuMapping){iova, m->addr, m->size};
-            e[1] = iova;
+            if (!m->iova) {
+                m->iova = mm_iova_next;
+                mm_iova_next += (uint32_t)((m->size + 0xffff) & ~0xffffull);
+                add_mapping(m->iova, m->addr, m->size);
+            }
+            e[1] = m->iova;
         }
         return NV_OK;
     }

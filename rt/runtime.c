@@ -66,6 +66,10 @@ void dispatch(CPU *c, uint64_t target) {
 
 void trace_enter(CPU *c, uint64_t f) {
     fprintf(stderr, "[trace] -> %#lx(x0=%#lx x1=%#lx x2=%#lx x3=%#lx x4=%#lx) lr=%#lx\n", f, c->x[0], c->x[1], c->x[2], c->x[3], c->x[4], c->x[30]);
+    if (getenv("TRACE_DEREF") && c->x[0] > 0x1000000) {
+        uint64_t off = strtoull(getenv("TRACE_DEREF"), NULL, 0);
+        fprintf(stderr, "[trace]    [x0+%#lx] = %#lx\n", off, M64(c->x[0] + off));
+    }
 }
 void trace_exit(CPU *c, uint64_t f) { fprintf(stderr, "[trace] <- %#lx = %#lx\n", f, c->x[0]); }
 

@@ -7,10 +7,10 @@ RT = $(filter-out rt/main.c rt/smoke.c,$(wildcard rt/*.c))
 RTH = $(wildcard rt/*.h)
 
 build/dread: rt/main.c $(RT) $(RTH) build/libdread.a
-	$(CC) -O1 -g -fPIE -pie -Wall -Irt -Irt/sdlshim rt/main.c $(RT) build/libdread.a /usr/lib64/libSDL2-2.0.so.0 -lm -lpthread -o $@
+	$(CC) -O1 -g -fPIE -pie -Wall -Irt -Irt/sdlshim -I/usr/include/ffmpeg rt/main.c $(RT) build/libdread.a /usr/lib64/libSDL2-2.0.so.0 -lavformat -lavcodec -lswscale -lavutil -lm -lpthread -o $@
 
 build/smoke: rt/smoke.c $(RT) $(RTH) build/libdread.a
-	$(CC) -O1 -fPIE -pie -Irt -Irt/sdlshim rt/smoke.c $(RT) build/libdread.a /usr/lib64/libSDL2-2.0.so.0 -lm -lpthread -o $@
+	$(CC) -O1 -fPIE -pie -Irt -Irt/sdlshim -I/usr/include/ffmpeg rt/smoke.c $(RT) build/libdread.a /usr/lib64/libSDL2-2.0.so.0 -lavformat -lavcodec -lswscale -lavutil -lm -lpthread -o $@
 
 build/libdread.a: $(OBJS)
 	rm -f $@ && ar rcs $@ $^
