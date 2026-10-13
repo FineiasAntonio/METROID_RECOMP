@@ -1,0 +1,12 @@
+*.nsp
+*.xci
+*.keys
+extracted/
+build/
+save/
+.venv/
+__pycache__/
+*.o
+tools/hactool
+tools/hactool-src/hactool
+tools/hactool-src/config.mk
